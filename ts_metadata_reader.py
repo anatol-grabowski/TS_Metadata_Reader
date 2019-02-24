@@ -28,6 +28,8 @@ import sys
 import argparse
 import os
 
+shift_amount = 100000
+
 def read_ts(bs):
     ts_bits = bs.read(40)
     ts_bits.pos += 4
@@ -97,14 +99,20 @@ def read_pes_header(packet):
     if ptspresent:
         packet.pos += 14
         pts = read_ts(packet)
-        if av == 'video':
+        if av == 'video' or av == 'audio':
             print('before', pts)
             packet.pos -= 40
-            write_ts(packet, pts + 1)
+            write_ts(packet, pts + shift_amount)
             packet.pos -= 40
             print('after', read_ts(packet))
     if dtspresent:
         dts = read_ts(packet)
+        if av == 'video' or av == 'audio':
+            print('before', dts)
+            packet.pos -= 40
+            write_ts(packet, dts + shift_amount)
+            packet.pos -= 40
+            print('after', read_ts(packet))
     return pestype, av, pts, dts
 
 

@@ -1,4 +1,4 @@
-from ts_metadata_reader import TSRead
+import ts_metadata_reader
 import sys
 
 def pack_to_str(p):
@@ -9,8 +9,11 @@ def pack_to_str(p):
     return s
 
 
-filepath = sys.argv[1] if len(sys.argv) > 1 else 'c:\\Users\\tot\\Downloads\\shifted_bus_000.ts'
-ts = TSRead(filepath)
+filepath = sys.argv[1] if len(sys.argv) >= 2 else 'c:\\Users\\tot\\Downloads\\shifted_bus_000.ts'
+ts_metadata_reader.shift_amount = int(sys.argv[2]) if len(sys.argv) >= 3 else 0
+
+
+ts = ts_metadata_reader.TSRead(filepath)
 print('ts.totalpackets', ts.totalpackets)
 num_packs_with_pts = 0
 num_packs_with_dts = 0
