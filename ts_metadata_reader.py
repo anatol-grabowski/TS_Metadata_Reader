@@ -28,16 +28,97 @@ import sys
 import argparse
 import os
 
+def read_ts(bs):
+    ts_bits = bs.read(40)
+    ts_bits.pos += 4
+    part1 = ts_bits.read(3)
+    ts_bits.pos += 1
+    part2 = ts_bits.read(15)
+    ts_bits.pos += 1
+    part3 = ts_bits.read(15)
+    ts_bits.pos += 1
+    parts = [part1.bin, part2.bin, part3.bin]
+    ts = bitstring.ConstBitArray().join(['0b' + part for part in parts])
+    # print('read', ts.bin)
+    decoded = ts.uint
+    return decoded
+
+def write_ts(bs, new_ts):
+    new_ts_bin = bin(new_ts)
+    new_ts_bin_len = len(new_ts_bin) - 2
+    ts_bits33 = bitstring.BitStream(length=33)
+    ts_bits33.overwrite(new_ts_bin, pos=-new_ts_bin_len)
+    ts_bits33.pos = 0
+    # print('writ', ts_bits33.bin)
+    part1 = ts_bits33.read(3)
+    part2 = ts_bits33.read(15)
+    part3 = ts_bits33.read(15)
+    bs.pos += 4
+    bs.overwrite(part1)
+    bs.pos += 1
+    bs.overwrite(part2)
+    bs.pos += 1
+    bs.overwrite(part3)
+    bs.pos += 1
+
+def read_adaptation_field(packet):
+    adaptation_size = packet.read(8).uint
+    discontinuity = packet.read(1).uint
+    random = packet.read(1).uint
+    espriority = packet.read(1).uint
+    pcrpresent = packet.read(1).uint
+    opcrpresent = packet.read(1).uint
+    splicingpoint = packet.read(1).uint
+    transportprivate = packet.read(1).uint
+    adaptation_ext = packet.read(1).uint
+    restofadapt = (adaptation_size+3) - 1
+    pcr, opcr = None, None
+    if pcrpresent == 1:
+        pcr = packet.read(48)
+        restofadapt -=  6
+    if opcrpresent == 1:
+        opcr = packet.read(48)
+        restofadapt -=  6
+    return (adaptation_size, discontinuity, random, espriority, splicingpoint,
+        transportprivate, adaptation_ext, restofadapt, pcr, opcr)
+
+def read_pes_header(packet):
+    pesync = packet.read(24).hex
+    if pesync != '000001': return None, None, None, None
+    pestype = packet.read(8).uint
+    av, pts, dts = None, None, None
+    if pestype > 223 and pestype < 240:
+        av = 'video'
+    if pestype < 223 and pestype > 191:
+        av = 'audio'
+    packet.pos += 3 * 8
+    ptspresent = packet.read(1).uint
+    dtspresent = packet.read(1).uint
+    if ptspresent:
+        packet.pos += 14
+        pts = read_ts(packet)
+        if av == 'video':
+            print('before', pts)
+            packet.pos -= 40
+            write_ts(packet, pts + 1)
+            packet.pos -= 40
+            print('after', read_ts(packet))
+    if dtspresent:
+        dts = read_ts(packet)
+    return pestype, av, pts, dts
+
+
 class TSRead():
     """
     Class to read TS files.
     """
-    def __init__(self, tsfile):
+    def __init__(self, tsfile, outfile='shifted.ts'):
         self.tsfile = tsfile
         self.tsopen = open(tsfile, 'rb')
+        self.outfile = open(outfile, 'wb+')
         self.pos = -188
         self.bytes = self.tsopen.read(188)
-        self.bits = bitstring.ConstBitStream(bytes=self.bytes, length=1504)
+        self.bits = bitstring.BitStream(bytes=self.bytes, length=1504)
         self.packetnum = 0
         self.filesize = os.path.getsize(tsfile)
         self.totalpackets = self.filesize/188
@@ -54,9 +135,11 @@ class TSRead():
         if not self.pos == self.filesize:
             self.tsopen.seek(self.pos)
             self.bytes = self.tsopen.read(188)
-            self.bits = bitstring.ConstBitStream(bytes=self.bytes, length=1504)
+            self.bits = bitstring.BitStream(bytes=self.bytes, length=1504)
             self.packetnum += 1
         tsdata = self.decodets()
+
+        self.outfile.write(self.bits.bytes)
 
         return tsdata
 
@@ -68,7 +151,7 @@ class TSRead():
         if not self.pos == self.filesize:
             self.tsopen.seek(self.pos)
             self.bytes = self.tsopen.read(188)
-            self.bits = bitstring.ConstBitStream(bytes=self.bytes, length=1504)
+            self.bits = bitstring.BitStream(bytes=self.bytes, length=1504)
             self.packetnum -= 1
         tsdata = self.decodets()
 
@@ -81,7 +164,7 @@ class TSRead():
         self.pos = self.filesize - 188
         self.tsopen.seek(self.pos)
         self.bytes = self.tsopen.read(188)
-        self.bits = bitstring.ConstBitStream(bytes=self.bytes, length=1504)
+        self.bits = bitstring.BitStream(bytes=self.bytes, length=1504)
         self.packetnum = self.totalpackets
         tsdata = self.decodets()
         return tsdata
@@ -125,107 +208,21 @@ class TSRead():
         pusi = self.bits.read(1).uint
         transportpri = self.bits.read(1).uint
         pid = self.bits.read(13).uint
-        packet = self.bits.read((packsize-3)*8)
+        # packet = self.bits.read((packsize-3)*8)
+        packet = self.bits
         scramblecontrol = packet.read(2).uint
         adapt = packet.read(2).uint
+        has_adaptation_field = adapt == 3 or adapt == 2
+        has_payload = adapt == 3 or adapt == 1
         concounter = packet.read(4).uint
-        if adapt == 3:
-            adaptation_size = packet.read(8).uint
-            discontinuity = packet.read(1).uint
-            random = packet.read(1).uint
-            espriority = packet.read(1).uint
-            pcrpresent = packet.read(1).uint
-            opcrpresent = packet.read(1).uint
-            splicingpoint = packet.read(1).uint
-            transportprivate = packet.read(1).uint
-            adaptation_ext = packet.read(1).uint
-            restofadapt = (adaptation_size+3) - 1
-            if pcrpresent == 1:
-                pcr = packet.read(48)
-                restofadapt -=  6
-            if opcrpresent == 1:
-                opcr = packet.read(48)
-                restofadapt -=  6
+        if has_adaptation_field:
+            (adaptation_size, discontinuity, random, espriority,
+                splicingpoint, transportprivate, adaptation_ext, restofadapt,
+                pcr, opcr) = read_adaptation_field(packet)
             packet.pos += (restofadapt-3) * 8
+        if has_payload:
             if ((packet.len - packet.pos)/8) > 5:
-                pesync = packet.read(24).hex
-                if pesync == '000001':
-                    pestype = packet.read(8).uint
-                    if pestype > 223 and pestype < 240:
-                        av = 'video'
-                    if pestype < 223 and pestype > 191:
-                        av = 'audio'
-                    packet.pos += (3*8)
-                    ptspresent = packet.read(1).uint
-                    dtspresent = packet.read(1).uint
-                    if ptspresent:
-                        packet.pos += (14)
-                        pts = packet.read(40)
-                        pts.pos = 4
-                        firstpartpts = pts.read(3)
-                        pts.pos += 1
-                        secondpartpts = pts.read(15)
-                        pts.pos += 1
-                        thirdpartpts = pts.read(15)
-                        parts = [firstpartpts.bin, secondpartpts.bin, thirdpartpts.bin]
-                        decodedpts = bitstring.ConstBitArray().join(['0b' + part for part in parts]).uint
-                    if dtspresent:
-                        dts = packet.read(40)
-                        dts.pos = 4
-                        firstpartdts = dts.read(3)
-                        dts.pos += 1
-                        secondpartdts = dts.read(15)
-                        dts.pos += 1
-                        thirdpartdts = dts.read(15)
-                        parts = [firstpartdts.bin, secondpartdts.bin, thirdpartdts.bin]
-                        decodeddts = bitstring.ConstBitArray().join(['0b' + part for part in parts]).uint
-        elif adapt == 2:
-            #if adapt is 2 the packet is only an adaptation field
-            adaptation_size = packet.read(8).uint
-            discontinuity = packet.read(1).uint
-            random = packet.read(1).uint
-            espriority = packet.read(1).uint
-            pcrpresent = packet.read(1).uint
-            opcrpresent = packet.read(1).uint
-            splicingpoint = packet.read(1).uint
-            transportprivate = packet.read(1).uint
-            adaptation_ext = packet.read(1).uint
-            restofadapt = (adaptation_size+3) - 1
-            if pcrpresent == 1:
-                pcr = packet.read(48)
-                restofadapt -=  6
-            if opcrpresent == 1:
-                opcr = packet.read(48)
-                restofadapt -=  6
-        elif adapt == 1:
-            pesync = packet.read(24).hex
-            if pesync == '000001':
-                pestype = packet.read(8).uint
-                if pestype > 223 and pestype < 240:
-                    av = 'video'
-                if pestype < 223 and pestype > 191:
-                    av = 'audio'
-                packet.pos += 24
-                ptspresent = packet.read(1).uint
-                dtspresent = packet.read(1).uint
-                if ptspresent:
-                    packet.pos += 22
-                    pts = packet.read(32)
-                    firstpart = pts.read(15)
-                    pts.pos += 1
-                    secondpart = pts.read(15)
-                    parts = [firstpart.bin, secondpart.bin]
-                    decodedpts = bitstring.ConstBitArray().join(['0b' + part for part in parts]).uint
-                if dtspresent:
-                    dts = packet.read(40)
-                    dts.pos = 4
-                    firstpartdts = dts.read(3)
-                    dts.pos += 1
-                    secondpartdts = dts.read(15)
-                    dts.pos += 1
-                    thirdpartdts = dts.read(15)
-                    parts = [firstpartdts.bin, secondpartdts.bin, thirdpartdts.bin]
-                    decodeddts = bitstring.ConstBitArray().join(['0b' + part for part in parts]).uint
+                pestype, av, decodedpts, decodeddts = read_pes_header(packet)
 
         tsobj = TSPacket(sync, tei, transportpri, pusi, pid, scramblecontrol, adapt, concounter, adaptation_size, discontinuity, \
         random, espriority, pcrpresent, opcrpresent, splicingpoint, transportprivate, adaptation_ext, pcr, opcr, pestype, \
